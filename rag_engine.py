@@ -18,8 +18,9 @@ load_dotenv()
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 
-INDEX_PATH      = "data/index.faiss"
-META_PATH       = "data/chunks_meta.json"
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+INDEX_PATH      = os.path.join(BASE_DIR, "data", "index.faiss")
+META_PATH       = os.path.join(BASE_DIR, "data", "chunks_meta.json")
 MODEL_NAME      = "paraphrase-multilingual-mpnet-base-v2"
 GROQ_MODEL      = "llama-3.3-70b-versatile"
 SEUIL_CONFIANCE = 0.35
