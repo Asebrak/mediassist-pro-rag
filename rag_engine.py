@@ -1,5 +1,5 @@
 """
-rag_engine.py — Cerveau central du RAG Médicaments
+rag_engine.py - Cerveau central du RAG Médicaments
 Module unique importé par rag.py (CLI) ET dashboard.py (Streamlit).
 Charge index.faiss + chunks_meta.json une seule fois.
 """
@@ -46,7 +46,182 @@ class RAGEngine:
         if not os.path.exists(INDEX_PATH) or not os.path.exists(META_PATH):
             raise FileNotFoundError(
                 "Base vectorielle introuvable.\n"
+                "Lancez d'abord : python indexation.py"
+            )
 
+        print("⏳ Chargement de l'index FAISS...")
+        self.index = faiss.read_index(INDEX_PATH)
+
+        print("⏳ Chargement des métadonnées...")
+        with open(META_PATH, "r", encoding="utf-8") as f:
+            self.chunks_meta = json.load(f)
+
+        print(f"⏳ Chargement du modèle d'embedding : {MODEL_NAME}")
+        self.modele = SentenceTransformer(MODEL_NAME)
+
+        self.client = Groq(api_key=api_key)
+
+        print(f"✅ RAGEngine prêt - {self.index.ntotal:,} vecteurs | "
+              f"{len(self.chunks_meta):,} chunks")
+
+    # ─── Recherche vectorielle ────────────────────────────────────────────────
+
+    def rechercher(self, question: str, k: int = TOP_K) -> list[dict]:
+        """
+        Encode la question et retourne les k chunks les plus similaires.
+        Score = similarité cosinus (entre -1 et 1, 1 = identique).
+        """
+        vecteur = self.modele.encode(
+            [question], convert_to_numpy=True
+        ).astype(np.float32)
+        faiss.normalize_L2(vecteur)
+
+        scores, indices = self.index.search(vecteur, k)
+
+        return [
+            {
+                "contenu":  self.chunks_meta[idx]["contenu"],
+                "metadata": self.chunks_meta[idx]["metadata"],
+                "score":    float(score),
+            }
+            for score, idx in zip(scores[0], indices[0])
+            if idx >= 0 and float(score) >= SEUIL_CONFIANCE
+        ]
+
+    # ─── Reformulation (Bonus C) ──────────────────────────────────────────────
+
+    def reformuler(self, question: str) -> str:
+        """
+        Reformule la question en mots-clés pharmaceutiques
+        pour améliorer la recherche vectorielle.
+        """
+        try:
+            resp = self.client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content":
+                    f"Reformule en 5-8 mots-clés pharmaceutiques pour recherche documentaire.\n"
+                    f"Réponds UNIQUEMENT avec les mots-clés.\n"
+                    f"Question : {question}"}],
+                max_tokens=60,
+                temperature=0.2,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            return question
+
+    # ─── Prompt système ───────────────────────────────────────────────────────
+
+    def _prompt_systeme(self, profil: dict) -> str:
+        prenom = profil.get("prenom", "le patient")
+        return f"""Tu es MediAssist Pro, un assistant pharmaceutique expert et bienveillant.
+Tu t'adresses à {prenom} de façon chaleureuse et claire - pas robotique.
+
+PROFIL PATIENT :
+- Prénom    : {profil.get('prenom', '?')}
+- Sexe      : {profil.get('sexe', '?')}
+- Âge       : {profil.get('age', '?')} ans
+- Poids     : {profil.get('poids', '?')} kg
+- Grossesse : {profil.get('grossesse', '?')}
+- Allergies : {profil.get('allergies', 'aucune')}
+- Médicaments en cours : {profil.get('medicaments', 'aucun')}
+- Antécédents : {profil.get('antecedents', 'aucun')}
+
+RÈGLES ABSOLUES :
+1. Réponds UNIQUEMENT à partir du contexte fourni. Jamais d'invention.
+2. Ne cite QUE les médicaments pertinents pour la question posée.
+3. Tiens compte du profil patient :
+   - Allergie détectée - signale-la immédiatement en ROUGE
+   - Médicament en cours interagissant - mentionne-le
+   - Grossesse - adapte systématiquement les mises en garde
+4. Si l'information est absente du contexte - dis-le clairement.
+5. Commence par t'adresser à {prenom} par son prénom.
+6. Structure ta réponse : Médicament / Posologie / Précautions.
+7. TOUJOURS terminer par :
+⚠️ Ces informations ne remplacent pas l'avis d'un professionnel de santé.
+En cas de doute, consulte ton médecin ou ton pharmacien."""
+
+    # ─── Génération de réponse ────────────────────────────────────────────────
+
+    def generer_reponse(
+        self,
+        question: str,
+        chunks: list[dict],
+        profil: dict,
+        historique: list[dict] | None = None,
+    ) -> str:
+        """
+        Génère une réponse via Groq en injectant le contexte RAG.
+        Respecte la limite de tokens (max 5000 tokens de contexte).
+        """
+        if historique is None:
+            historique = []
+
+        # Construire le contexte en respectant la limite de tokens
+        contexte_parts = []
+        tokens_total   = 0
+        MAX_TOKENS_CTX = 5000
+
+        for i, chunk in enumerate(chunks):
+            tokens_chunk = len(chunk["contenu"]) // 4
+            if tokens_total + tokens_chunk > MAX_TOKENS_CTX:
+                break
+            denom = chunk["metadata"].get("denomination", "?")
+            contexte_parts.append(
+                f"[Source {i+1} - {denom} | score {chunk['score']:.2f}]\n{chunk['contenu']}"
+            )
+            tokens_total += tokens_chunk
+
+        contexte = "\n\n---\n\n".join(contexte_parts)
+
+        messages = [{"role": "system", "content": self._prompt_systeme(profil)}]
+        messages += historique[-6:]  # 3 derniers échanges
+        messages.append({
+            "role": "user",
+            "content": f"Contexte (notices médicales BDPM/ANSM) :\n\n{contexte}\n\nQuestion : {question}"
+        })
+
+        resp = self.client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=messages,
+            max_tokens=1000,
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content
+
+    # ─── Score de sécurité personnalisé ──────────────────────────────────────
+
+    def evaluer_securite(self, question: str, chunks: list[dict], profil: dict) -> dict:
+        """
+        Analyse le profil patient vs les informations médicamenteuses.
+        Retourne VERT / ORANGE / ROUGE avec les raisons.
+        """
+        ctx = "\n".join(c["contenu"][:400] for c in chunks[:3])
+        profil_txt = (
+            f"Allergies : {profil.get('allergies','aucune')}\n"
+            f"Grossesse : {profil.get('grossesse','non')}\n"
+            f"Médicaments en cours : {profil.get('medicaments','aucun')}\n"
+            f"Antécédents : {profil.get('antecedents','aucun')}\n"
+            f"Âge : {profil.get('age','?')} ans | Sexe : {profil.get('sexe','?')}"
+        )
+
+        prompt = f"""Tu es un expert en pharmacovigilance.
+Analyse ce profil patient et ces informations médicamenteuses.
+Réponds UNIQUEMENT en JSON valide, sans texte avant ou après.
+
+PROFIL :
+{profil_txt}
+
+INFORMATIONS MÉDICAMENTEUSES :
+{ctx}
+
+JSON attendu :
+{{
+  "niveau": "VERT" ou "ORANGE" ou "ROUGE",
+  "raisons": ["raison 1", "raison 2"],
+  "contre_indications_detectees": [],
+  "interactions_detectees": [],
+  "recommandation": "phrase courte"
+}}
 
 VERT = aucune CI | ORANGE = précautions | ROUGE = CI formelle ou allergie"""
 
@@ -101,7 +276,7 @@ VERT = aucune CI | ORANGE = précautions | ROUGE = CI formelle ou allergie"""
     ) -> dict:
         """
         Pipeline RAG complet pour une question :
-        Reformulation → Recherche → Sécurité → Génération → Hallucinations
+        Reformulation - Recherche - Sécurité - Génération - Hallucinations
         Retourne un dict avec tous les résultats + la trace complète.
         """
         t0 = time.time()
@@ -185,7 +360,7 @@ VERT = aucune CI | ORANGE = précautions | ROUGE = CI formelle ou allergie"""
 
     def mode_symptomes(self, symptomes: str, profil: dict) -> dict:
         """
-        L'utilisateur décrit ses symptômes → on cherche les médicaments
+        L'utilisateur décrit ses symptômes - on cherche les médicaments
         pertinents et on les évalue selon son profil.
         """
         # Reformuler les symptômes en termes pharmaceutiques
