@@ -1,0 +1,12 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+data/CIS_RCP.zip
+data/CIS_RCP.csv
+data/CIS_RCP.zip
+data/index.faiss
+data/chunks_meta.json
+files.zip
