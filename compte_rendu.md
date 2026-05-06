@@ -1,15 +1,15 @@
 # Compte-rendu — TP RAG Médicaments
 
 ## Sujet choisi
-**Sujet B — Assistant Médicaments**  
-Système RAG permettant de répondre à des questions sur les médicaments courants à partir de données pharmaceutiques officielles.
+**Sujet B : Assistant Médicaments**  
+En quoi consiste ce sujet : Système RAG permettant de répondre à des questions sur les médicaments courants à partir de données pharmaceutiques officielles.
 
 ---
 
 ## Difficultés rencontrées
 
 ### 1. Accès à l'API médicaments.gouv.fr
-L'API publique `api.medicaments.gouv.fr` est parfois instable ou renvoie des réponses JSON mal structurées selon les médicaments. J'ai implémenté un **système de fallback** : si l'API échoue (timeout, réponse vide, format inattendu), le code utilise une base de données enrichie définie directement dans `indexation.py`. Cette approche garantit que l'indexation fonctionne toujours, quel que soit l'état de l'API externe, tout en intégrant les vraies données quand elles sont disponibles.
+En premier, l'API publique `api.medicaments.gouv.fr` est parfois instable ou renvoie des réponses JSON mal structurées selon les médicaments. J'ai implémenté un **système de fallback** : si l'API échoue (timeout, réponse vide, format inattendu), le code utilise une base de données enrichie définie directement dans `indexation.py`. Cette approche garantit que l'indexation fonctionne toujours, quel que soit l'état de l'API externe, tout en intégrant les vraies données quand elles sont disponibles.
 
 ### 2. Chunking adapté aux notices médicales
 Les notices sont des documents courts mais très denses. Un chunking naïf (par nombre fixe de caractères) cassait les sections importantes au milieu d'une phrase. J'ai choisi une **découpe prioritaire par sauts de ligne** avec un overlap de 80 caractères. Cela préserve la cohérence sémantique de chaque section (indications, posologie, effets indésirables…), ce qui améliore directement la précision de la recherche vectorielle.
